@@ -1,91 +1,78 @@
 import assert from "node:assert/strict";
-import { access, readFile, readdir } from "node:fs/promises";
-import test from "node:test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { after, before, test } from "node:test";
 
-const developmentPreviewMeta =
-  /<meta(?=[^>]*\bname=["']codex-preview["'])(?=[^>]*\bcontent=["']development["'])[^>]*>/i;
-const templateRoot = new URL("../", import.meta.url);
-const previewRoot = new URL("../app/_sites-preview/", import.meta.url);
+let worker;
+let origin;
+let output = "";
 
-async function render() {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
-
-  return worker.fetch(
-    new Request("http://localhost/", {
-      headers: { accept: "text/html" },
-    }),
-    {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
-    },
-  );
-}
-
-test("server-renders the starter loading skeleton", async () => {
-  const response = await render();
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
-
-  const html = await response.text();
-  assert.match(html, developmentPreviewMeta);
-  assert.match(html, /<title>Your site is taking shape<\/title>/i);
-  assert.match(html, /Building your site/);
-  assert.match(html, /Your site is taking shape/);
-  assert.match(
-    html,
-    /Your first version will appear here automatically when it’s ready\./,
-  );
-  assert.doesNotMatch(html, /Codex/);
-  assert.match(html, /react-loading-skeleton/);
-  assert.match(html, /role="status"/);
+before(async () => {
+  // The build targets workerd and imports cloudflare: modules, so it cannot be
+  // loaded by Node. Wrangler serves the actual built worker and static assets.
+  worker = spawn(process.execPath, [
+    "node_modules/wrangler/bin/wrangler.js", "dev", "--config", "dist/server/wrangler.json",
+    "--ip", "127.0.0.1", "--port", "0", "--local", "--show-interactive-dev-session=false",
+  ], { env: { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_WRITE_LOGS: "false" }, stdio: ["ignore", "pipe", "pipe"] });
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`Wrangler startup timed out: ${output.slice(-4000)}`)), 30000);
+    const read = (chunk) => {
+      output = (output + chunk.toString()).slice(-20000);
+      const match = output.match(/Ready on (http:\/\/127\.0\.0\.1:\d+)/);
+      if (match) { clearTimeout(timeout); origin = match[1]; resolve(); }
+    };
+    worker.stdout.on("data", read);
+    worker.stderr.on("data", read);
+    worker.once("error", (error) => { clearTimeout(timeout); reject(error); });
+    worker.once("exit", (code) => { clearTimeout(timeout); reject(new Error(`Wrangler exited ${code}: ${output.slice(-4000)}`)); });
+  });
 });
 
-test("keeps the loading skeleton scoped and disposable", async () => {
-  const [preview, css, page, layout, packageJson, files] = await Promise.all([
-    readFile(new URL("SkeletonPreview.tsx", previewRoot), "utf8"),
-    readFile(new URL("preview.css", previewRoot), "utf8"),
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../package.json", import.meta.url), "utf8"),
-    readdir(previewRoot),
-  ]);
+after(async () => {
+  if (worker && worker.exitCode === null && worker.signalCode === null) {
+    const exited = once(worker, "exit");
+    worker.kill("SIGTERM");
+    await exited;
+  }
+});
 
-  assert.deepEqual(files.sort(), ["SkeletonPreview.tsx", "preview.css"]);
-  assert.match(preview, /from "react-loading-skeleton"/);
-  assert.match(preview, /baseColor="#eceae7"/);
-  assert.match(preview, /highlightColor="#f9f8f6"/);
-  assert.match(preview, /duration=\{2\.8\}/);
-  assert.match(preview, /sites-skeleton-search-placeholder/);
-  assert.match(packageJson, /"react-loading-skeleton": "3\.5\.0"/);
+async function get(path) {
+  return fetch(new URL(path, origin), { redirect: "manual", headers: { accept: "text/html" } });
+}
 
-  const shellIndex = preview.indexOf('className="sites-skeleton-shell"');
-  const statusIndex = preview.indexOf('className="sites-skeleton-status"');
-  assert.ok(shellIndex >= 0 && statusIndex > shellIndex);
-  assert.match(css, /position:\s*fixed/);
-  assert.match(css, /inset:\s*0/);
-  assert.match(css, /opacity:\s*0\.52/);
-  assert.match(css, /prefers-reduced-motion:\s*reduce/);
-  assert.doesNotMatch(css, /#020617|canvas|pets|progress/i);
-  assert.doesNotMatch(
-    preview,
-    /loading-spinner|status-mark|status-progress|canvas|cookie|random/i,
-  );
+test("root redirects to the default locale and invalid locales return 404", async () => {
+  const root = await get("/");
+  assert.equal(root.status, 307);
+  assert.equal(new URL(root.headers.get("location"), origin).pathname, "/en");
+  assert.equal((await get("/not-a-locale")).status, 404);
+});
 
-  assert.match(page, /export const metadata:\s*Metadata/);
-  assert.match(page, /"codex-preview": "development"/);
-  assert.match(page, /<SkeletonPreview \/>/);
-  assert.match(layout, /title:\s*"Starter Project"/);
-  assert.doesNotMatch(layout, /codex-preview|_sites-preview|themeColor|\bViewport\b/);
-  assert.doesNotMatch(css, /(^|\s)(html|body)\s*\{/m);
+test("built worker server-renders the English anatomy page and its assets", async () => {
+  const response = await get("/en");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /^text\/html\b/);
+  const html = await response.text();
+  assert.match(html, /<html lang="en" dir="ltr">/);
+  assert.match(html, /<main class="app-shell">/);
+  assert.match(html, /<h1[^>]*>Heart<\/h1>/);
+  assert.match(html, /Organ library/);
+  assert.match(html, /Cardiovascular/);
+  assert.match(html, /<title>Anatomy Atelier/);
+  assert.match(html, /rel="canonical" href="[^"]+\/en"/);
+  const stylesheet = html.match(/<link rel="stylesheet"[^>]*href="([^"]+)"/);
+  assert.ok(stylesheet, "rendered page links to a stylesheet");
+  assert.equal((await get(stylesheet[1])).status, 200);
+  const image = await get("/anatomy/heart/thumb.webp");
+  assert.equal(image.status, 200);
+  assert.match(image.headers.get("content-type"), /^image\/webp/);
+});
 
-  await assert.rejects(
-    access(new URL("public/_sites-preview", templateRoot)),
-  );
+test("built worker renders translated content and RTL metadata", async () => {
+  const response = await get("/ar");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<html lang="ar" dir="rtl">/);
+  assert.match(html, /<h1[^>]*>القلب<\/h1>/);
+  assert.match(html, /مكتبة الأعضاء/);
+  assert.match(html, /rel="canonical" href="[^"]+\/ar"/);
 });
