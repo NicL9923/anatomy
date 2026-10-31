@@ -89,7 +89,10 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 
 - `npm run dev`: start local development
 - `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
+- `npm test`: build the worker and test rendered routes with local Wrangler
+- `npm run typecheck`: check types with the native TypeScript preview
+- `npm run lint`: check application and tooling source
+- `npm run i18n:audit`: check translation coverage
 - `npm run db:generate`: generate Drizzle migrations after schema changes
 
 ## Learn More
@@ -97,14 +100,9 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - [vinext Documentation](https://github.com/cloudflare/vinext)
 - [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
 
-## Dependency update status
-
-This dependency update is a work in progress. The rendered HTML tests still target
-starter files absent from this repository, and the current Cloudflare worker build
-cannot be imported directly by the Node test runner because it uses `cloudflare:`
-modules. Server-rendered output has not been verified after the update. Resolve
-these failures before treating this branch as ready to merge.
+## Tooling notes
 
 The native TypeScript preview runs with `npm run typecheck`; TypeScript 6 remains
 installed for tools that use its compiler API. ESLint remains on version 9 because
-several Next.js ESLint plugins do not yet declare support for version 10.
+several Next.js ESLint plugins do not yet declare support for version 10. The
+rendered route tests run the production build in Wrangler's local Workers runtime.
